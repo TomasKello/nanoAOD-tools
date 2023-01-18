@@ -46,6 +46,7 @@ class jetmetUncertaintiesProducer(Module):
 
         # if set to true, Jet_pt_nom will have JER applied. not to be
         # switched on for data.
+        self.undoJER = True
         self.applySmearing = applySmearing if not isData else False
         self.jerUncertainties = jerUncertainties if not isData else False
         self.splitJER = splitJER
@@ -253,17 +254,24 @@ class jetmetUncertaintiesProducer(Module):
 
         #Define alternative jet branch
         self.altJetBranchName = ""
-        brToCheck = ["rawFactor","area","muonSubtrFactor","neEmEF","chEmEF"]     
+        brToCheck = ["rawFactor","area","muonSubtrFactor","neEmEF","chEmEF"]
+        brToUndoJER = ["Idx_preJER","corr_JER"]     
         self.hasThisBr = {}
+        self.hasThisBrJER = {}
         for br in brToCheck:
             self.hasThisBr[br] = False
+        for br in brToUndoJER:
+            self.hasThisBrJER[br] = False
         self.hasMass = False 
         hasIdx  = False
+        self.canUndoJER = True
         oBrList = copy.deepcopy(self.out._tree.GetListOfBranches())
         for br in oBrList:
             bname = br.GetName()
             for brKey in brToCheck:
                 if bname == self.jetBranchName+"_"+brKey: self.hasThisBr[brKey] = True
+            for brKey in brToUndoJER:
+                if brKey in bname: self.hasThisBrJER[brKey] = True 
             if bname == self.jetBranchName+"_mass": self.hasMass = True
             if bname == self.jetBranchName+"_jetIdx": hasIdx = True
         if (not self.hasMass or any(hasThisBr==False for br,hasThisBr in self.hasThisBr.items())) and hasIdx:
@@ -280,7 +288,12 @@ class jetmetUncertaintiesProducer(Module):
                 if not hasThisBr:
                     print("[ERROR]   No alternative "+br+" branch was found. Aborting...")
             if any(hasThisBr==False for br,hasThisBr in self.hasThisBr.items()):
-                sys.exit(1)     
+                sys.exit(1) 
+        if any(hasThisBrJER==False for br,hasThisBrJER in self.hasThisBrJER.items()): 
+            self.canUndoJER = False   
+        if self.undoJER and not self.canUndoJER:
+            print("[ERROR]   Unable to undo JER smearing. Aborting...")
+            sys.exit(1)  
 
         #Initialize new branches
         if self.applySmearing or self.redoJEC:
@@ -307,8 +320,8 @@ class jetmetUncertaintiesProducer(Module):
 
 
         for metBranchName in self.metBranchNames:
-            self.out.branch("%s_T1_pt" % metBranchName, "F")
-            self.out.branch("%s_T1_phi" % metBranchName, "F")
+            self.out.branch("%s_pt" % metBranchName, "F")
+            self.out.branch("%s_phi" % metBranchName, "F")
 
             if not self.isData and "Puppi" not in metBranchName:
                 self.out.branch("%s_T1Smear_pt" % metBranchName, "F")
@@ -331,10 +344,10 @@ class jetmetUncertaintiesProducer(Module):
                         if "Puppi" in metBranchName: continue 
                         if 'T1' in self.saveMETUncs:
                             self.out.branch(
-                                "%s_T1_pt_JER%s%s" %
+                                "%s_pt_JER%s%s" %
                                 (metBranchName, jerID, shift), "F")
                             self.out.branch(
-                                "%s_T1_phi_JER%s%s" %
+                                "%s_phi_JER%s%s" %
                                 (metBranchName, jerID, shift), "F")
                         if 'T1Smear' in self.saveMETUncs:
                             self.out.branch(
@@ -358,10 +371,10 @@ class jetmetUncertaintiesProducer(Module):
                 for metBranchName in self.metBranchNames:    
                     if 'T1' in self.saveMETUncs:
                         self.out.branch(
-                            "%s_T1_pt_JES%s%s" %
+                            "%s_pt_JES%s%s" %
                             (metBranchName, jesUncertainty, shift), "F")
                         self.out.branch(
-                            "%s_T1_phi_JES%s%s" %
+                            "%s_phi_JES%s%s" %
                             (metBranchName, jesUncertainty, shift), "F")
                     if 'T1Smear' in self.saveMETUncs and "Puppi" not in metBranchName:
                         self.out.branch(
@@ -393,8 +406,30 @@ class jetmetUncertaintiesProducer(Module):
     def analyze(self, event):
         """process event, return True (go to next module) or False (fail,
         go to next event)"""
-        jets = Collection(event, self.jetBranchName)
-        nJet = getattr(event,"n"+self.jetBranchName)
+        # Undo JER smearing if previously applied
+        _jets = Collection(event, self.jetBranchName)
+        _nJet = getattr(event,"n"+self.jetBranchName)
+        if self.undoJER and self.canUndoJER:
+            _jetBranchName = self.jetBranchName[0].lower()+self.jetBranchName[1:]
+            newjets = _jets
+            for _ijet, _jet in enumerate(_jets):
+                origIdx = _jet[_jetBranchName+"Idx_preJER"]
+                corrJER = _jet["corr_JER"]
+                orig_jet_pt = _jet.pt/corrJER
+                oBrList = copy.deepcopy(self.out._tree.GetListOfBranches())
+                for br in oBrList:
+                    bname = br.GetName()
+                    _bname = bname.replace(self.jetBranchName+"_","")
+                    if self.jetBranchName+"_" in bname and hasattr(_jet, _bname):
+                        if bname == self.jetBranchName+"_pt":
+                            setattr(newjets[origIdx], _bname, orig_jet_pt)   
+                        else: 
+                            setattr(newjets[origIdx], _bname, getattr(_jet, _bname))   
+            jets = newjets
+            nJet = _nJet  
+        else: 
+            jets = _jets
+            nJet = _nJet
         lowPtJets = Collection(event,"CorrT1METJet") if self.isV5NanoAOD else []
 
         # Fix missing branches in the main jet collection 
@@ -1032,9 +1067,9 @@ class jetmetUncertaintiesProducer(Module):
 
             #Fill MET branches per each MET object   
             if self.redoJEC:
-                self.out.fillBranch("%s_T1_pt" % metBranchName,
+                self.out.fillBranch("%s_pt" % metBranchName,
                                     math.sqrt(met_T1_px**2 + met_T1_py**2))
-                self.out.fillBranch("%s_T1_phi" % metBranchName,
+                self.out.fillBranch("%s_phi" % metBranchName,
                                 math.atan2(met_T1_py, met_T1_px))
 
                 if not self.isData and self.applySmearing and "Puppi" not in metBranchName:
@@ -1050,20 +1085,20 @@ class jetmetUncertaintiesProducer(Module):
                         for shift in self.jesShifts:
                             if "up" in shift.lower():
                                 self.out.fillBranch(
-                                    "%s_T1_pt_JER%s%s" % (metBranchName, jerID, shift),
+                                    "%s_pt_JER%s%s" % (metBranchName, jerID, shift),
                                     math.sqrt(met_T1_px_jerUp[jerID]**2 +
                                           met_T1_py_jerUp[jerID]**2))
                                 self.out.fillBranch(
-                                    "%s_T1_phi_JER%s%s" % (metBranchName, jerID, shift),
+                                    "%s_phi_JER%s%s" % (metBranchName, jerID, shift),
                                     math.atan2(met_T1_py_jerUp[jerID],
                                                met_T1_px_jerUp[jerID])) 
                             if "do" in shift.lower():
                                 self.out.fillBranch(
-                                    "%s_T1_pt_JER%s%s" % (metBranchName, jerID, shift),
+                                    "%s_pt_JER%s%s" % (metBranchName, jerID, shift),
                                     math.sqrt(met_T1_px_jerDown[jerID]**2 +
                                               met_T1_py_jerDown[jerID]**2))
                                 self.out.fillBranch(
-                                    "%s_T1_phi_JER%s%s" % (metBranchName, jerID, shift),
+                                    "%s_phi_JER%s%s" % (metBranchName, jerID, shift),
                                     math.atan2(met_T1_py_jerDown[jerID],
                                                met_T1_px_jerDown[jerID]))
 
@@ -1071,23 +1106,23 @@ class jetmetUncertaintiesProducer(Module):
                     for shift in self.jesShifts:
                         if "up" in shift.lower():
                             self.out.fillBranch(
-                                "%s_T1_pt_JES%s%s" %
+                                "%s_pt_JES%s%s" %
                                 (metBranchName, jesUncertainty, shift),
                                 math.sqrt(met_T1_px_jesUp[jesUncertainty]**2 +
                                           met_T1_py_jesUp[jesUncertainty]**2))
                             self.out.fillBranch(
-                                "%s_T1_phi_JES%s%s" %
+                                "%s_phi_JES%s%s" %
                                 (metBranchName, jesUncertainty, shift),
                                 math.atan2(met_T1_py_jesUp[jesUncertainty],
                                            met_T1_px_jesUp[jesUncertainty]))
                         if "do" in shift.lower():  
                             self.out.fillBranch(
-                                "%s_T1_pt_JES%s%s" %
+                                "%s_pt_JES%s%s" %
                                 (metBranchName, jesUncertainty, shift),
                                 math.sqrt(met_T1_px_jesDown[jesUncertainty]**2 +
                                           met_T1_py_jesDown[jesUncertainty]**2))
                             self.out.fillBranch(
-                                "%s_T1_phi_JES%s%s" %
+                                "%s_phi_JES%s%s" %
                                 (metBranchName, jesUncertainty, shift),
                                 math.atan2(met_T1_py_jesDown[jesUncertainty],
                                            met_T1_px_jesDown[jesUncertainty]))
