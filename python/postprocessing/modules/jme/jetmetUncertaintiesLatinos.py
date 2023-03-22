@@ -50,6 +50,7 @@ class jetmetUncertaintiesProducer(Module):
         self.undoJER = True
         self.orderByPt = True
         self.applySmearing = applySmearing if not isData else False
+        self.applyAtLowPt = False #Latinos treatment only
         self.jerUncertainties = jerUncertainties if not isData else False
         self.splitJER = splitJER
         self.onlyJER = onlyJER
@@ -446,11 +447,11 @@ class jetmetUncertaintiesProducer(Module):
         _nJet = getattr(event,"n"+self.jetBranchName)
         if self.undoJER and self.canUndoJER:
             _jetBranchName = self.jetBranchName[0].lower()+self.jetBranchName[1:]
-            newjets = _jets
+            newjets = Collection(event, self.jetBranchName)
             for _ijet, _jet in enumerate(_jets):
-                origIdx = _jet[_jetBranchName+"Idx_preJER"]
-                corrJER = _jet["corr_JER"]
-                orig_jet_pt = _jet.pt/corrJER
+                origIdx = int(_jet[_jetBranchName+"Idx_preJER"])
+                corrJER = float(_jet["corr_JER"])
+                orig_jet_pt = float(_jet["pt"])/corrJER
                 oBrList = copy.deepcopy(self.out._tree.GetListOfBranches())
                 for br in oBrList:
                     bname = br.GetName()
@@ -635,9 +636,8 @@ class jetmetUncertaintiesProducer(Module):
                 else:
                     jet_rawpt = -1.0 * jet_pt  # If factor not present factor will be saved as -1
                     jet_rawmass = -1.0 * jet_mass  # If factor not present factor will be saved as -1
-
                 
-                (jet_pt, jet_mass) = self.jetReCalibrator.correct(jet, rho)
+                (jet_pt, jet_mass) = self.jetReCalibrator.correct(jet, rho) #KELLO: investigate why jet_pt is altered at this step (raw factor is wrong?)
                 (jet_pt_l1, jet_mass_l1) = self.jetReCalibratorL1.correct(jet, rho)
                 jet.pt = jet_pt
                 jet.mass = jet_mass
@@ -650,7 +650,6 @@ class jetmetUncertaintiesProducer(Module):
                         self.jetReCalibratorProd.correct(jet, rho)[0] / jet_rawpt)
                     jecL1Prod = (
                         self.jetReCalibratorProdL1.correct(jet, rho)[0] / jet_rawpt)
-
                 if not self.isData:
                     genJet = pairs[jet]
 
@@ -680,8 +679,9 @@ class jetmetUncertaintiesProducer(Module):
                 jet.pt = newjet.Pt()
                 jet.rawFactor = 0
                 # get the proper jet pts for type-1 MET
-                jet_pt_noMuL1L2L3 = jet.pt * jec
-                jet_pt_noMuL1 = jet.pt * jecL1
+
+                jet_pt_noMuL1L2L3 = jet.pt * jec 
+                jet_pt_noMuL1 = jet.pt * jecL1  
 
                 # this step is only needed for v2 MET in 2017 when different JECs
                 # are applied compared to the nanoAOD production
@@ -706,14 +706,19 @@ class jetmetUncertaintiesProducer(Module):
                     (jet_pt_jerNomVal, jet_pt_jerUpVal,
                      jet_pt_jerDownVal) = self.jetSmearer.getSmearValsPt(
                          jet, genJet, rho)
+                    #Latinos treatment only
+                    if "UL" in self.era and (not self.applyAtLowPt) and jet.pt<50 and abs(jet.eta)>=2.8 and abs(jet.eta)<=3:
+                        ( jet_pt_jerNomVal, jet_pt_jerUpVal, jet_pt_jerDownVal ) = ( 1.0, 1.0, 1.0 )
                 else:
                     # if you want to do something with JER in data, please add it here.
-                    (jet_pt_jerNomVal, jet_pt_jerUpVal, jet_pt_jerDownVal) = (1, 1,
-                                                                              1)
+                    (jet_pt_jerNomVal, jet_pt_jerUpVal, jet_pt_jerDownVal) = (1.0, 1.0, 1.0)
 
                 # these are the important jet pt values
-                #jet_pt_nom = jet_pt if jet_pt > 0 else 0
-                jet_pt_nom = jet_pt * jet_pt_jerNomVal if self.applySmearing else jet_pt
+                jet_pt = jet_pt_orig #KELLO temporary overwrite jet_pt to original value, jet_pt is then used as base for JER u/do variation 
+                if (self.undoJER and self.canUndoJER) and (self.applySmearing or self.jerUncertainties):   
+                    jet_pt_nom = jet_pt * jet_pt_jerNomVal #KELLO nominal pt is nominally smeared for jets outside of JER pt-eta variation region
+                else: 
+                    jet_pt_nom = jet_pt 
                 jet_pt_L1L2L3 = jet_pt_noMuL1L2L3 + muon_pt
                 jet_pt_L1 = jet_pt_noMuL1 + muon_pt
 
@@ -760,6 +765,7 @@ class jetmetUncertaintiesProducer(Module):
                 if not self.isData:
                     #evaluate JER uncertainties
                     if self.jerUncertainties:
+                        #KELLO: by default store nominally smeared values
                         jet_pt_jerUp = {
                             jerID: jet_pt_nom
                             for jerID in self.splitJERIDs
@@ -778,6 +784,7 @@ class jetmetUncertaintiesProducer(Module):
                         }
                         thisJERID = self.getJERsplitID(jet_pt_nom, jet.eta)
                         if thisJERID in self.splitJERIDs:  
+                            #KELLO: for selected JER ID overwrite with varied value based on jet_pt
                             jet_pt_jerUp[thisJERID] = jet_pt_jerUpVal * jet_pt
                             jet_pt_jerDown[thisJERID] = jet_pt_jerDownVal * jet_pt
                             jet_mass_jerUp[thisJERID] = jet_pt_jerUpVal * jet_mass
